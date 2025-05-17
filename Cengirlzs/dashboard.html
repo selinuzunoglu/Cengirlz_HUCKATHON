@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <title>Valyria Enerji Akışı Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <style>
         body { font-family: Arial, sans-serif; background: #f4f4f4; }
         .main-flex { display: flex; gap: 30px; }
@@ -28,6 +30,8 @@
         .filter-form label { margin-right: 6px; }
         .filter-form input, .filter-form select { margin-right: 10px; padding: 2px 6px; }
         .filter-form { margin-bottom: 10px; }
+        .blinking-marker { animation: blink 1s infinite; }
+        @keyframes blink { 0%{opacity:1;} 50%{opacity:0.2;} 100%{opacity:1;} }
     </style>
 </head>
 <body>
@@ -65,47 +69,41 @@
                 <span style="background:#8e44ad; border:2px solid #8e44ad; display:inline-block; width:18px; height:8px; border-radius:2px;"></span>Geothermal
                 <span style="background:#e67e22; border:2px solid #e67e22; display:inline-block; width:18px; height:8px; border-radius:2px;"></span>Nuclear
             </div>
+            <div style="margin-bottom:10px;">
+              <label for="metricSelect"><b>Gösterim:</b></label>
+              <select id="metricSelect">
+                <option value="anomaly">Anomali Sayısı</option>
+                <option value="production">Toplam Üretim</option>
+                <option value="loss">Toplam Kayıp</option>
+                <option value="outgoing">Toplam Giden</option>
+              </select>
+              <button id="showChartBtn" type="button">Göster</button>
+            </div>
+            <div id="chartError" style="color:red;font-weight:bold;margin-bottom:8px;"></div>
             <canvas id="chart" height="80"></canvas>
             <div>
-                <b>Son 10 Veri</b>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Zaman</th>
-                            <th>Enerji Tipi</th>
-                            <th>Rota Adı</th>
-                            <th>Değer (kW)</th>
-                        </tr>
-                    </thead>
-                    <tbody id="dataTable"></tbody>
-                </table>
+              <b>Son 10 Veri</b>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Zaman</th>
+                    <th>Enerji Tipi</th>
+                    <th>Rota Adı</th>
+                    <th>Üretim (kW)</th>
+                    <th>Giden (kW)</th>
+                    <th>Kayıp (kW)</th>
+                  </tr>
+                </thead>
+                <tbody id="dataTable"></tbody>
+              </table>
             </div>
             <div id="pagination"></div>
-            <div style="margin-top:20px;">
-              <b>Anomali Kayıtları</b>
-              <form id="anomalyFilterForm" onsubmit="return false;" style="margin-bottom:10px;">
-                <label>Yıl:</label>
-                <select id="anomalyYear"></select>
-                <label>Ay:</label>
-                <select id="anomalyMonth"><option value="">Tümü</option></select>
-                <label>Gün:</label>
-                <select id="anomalyDay"><option value="">Tümü</option></select>
-                <button type="button" onclick="fetchAnomalies()">Filtrele</button>
-              </form>
-              <div style="overflow-x:auto;">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Zaman</th>
-                      <th>Enerji Tipi</th>
-                      <th>Rota Adı</th>
-                      <th>Değer (kW)</th>
-                    </tr>
-                  </thead>
-                  <tbody id="anomalyTable"></tbody>
-                </table>
-              </div>
+            <div style="margin-bottom:8px;font-size:1.05em;background:#f4faff;padding:8px 14px;border-radius:6px;">
+              <b>Harita Açıklaması:</b> Kalın mavi çizgi = çok enerji/düşük kayıp, ince kırmızı çizgi = az enerji/yüksek kayıp, turuncu çizgi = orta kayıp, yanıp sönen kırmızı marker = şiddetli anomali, anahtar = bakım önerisi, tooltip = detay.
+              <button onclick="showDemoMap()" style="margin-left:16px;padding:4px 10px;">Demo Harita Göster</button>
             </div>
+            <div id="energyMap" style="height: 350px; margin-bottom: 20px; border-radius: 8px;"></div>
+            <div id="autoAdviceBox"></div>
         </div>
         <div class="right-panel">
           <h2>Geçmiş Veriler</h2>
@@ -135,6 +133,7 @@
             </select>
             <button type="button" onclick="fetchHistory()">Filtrele</button>
           </form>
+          <div id="historyPaginationTop"></div>
           <div style="overflow-x:auto;">
             <table>
               <thead>
@@ -142,525 +141,951 @@
                   <th>Zaman</th>
                   <th>Enerji Tipi</th>
                   <th>Rota Adı</th>
-                  <th>Değer (kW)</th>
+                  <th>Üretim (kW)</th>
+                  <th>Giden (kW)</th>
+                  <th>Kayıp (kW)</th>
+                  <th>Depolama (kW)</th>
                 </tr>
               </thead>
               <tbody id="historyTable"></tbody>
             </table>
           </div>
+          <div id="historyPaginationBottom"></div>
+          <div id="carbonSummaryTable"></div>
+          <div id="lossSummaryTable"></div>
         </div>
       </div>
     </div>
     <script>
-        let ws;
-        let chart;
-        let currentType = 'All';
-        let allHistory = [];
-        let currentPage = 1;
-        const rowsPerPage = 10;
-        const colors = {
-            'Solar': '#f39c12',
-            'Wind': '#2980b9',
-            'Battery': '#27ae60',
-            'Factory': '#7f8c8d',
-            'Hydro': '#3498db',
-            'Geothermal': '#8e44ad',
-            'Nuclear': '#e67e22'
-        };
-        function connectWS() {
-            if (ws) ws.close();
-            ws = new WebSocket(`ws://${location.host}/ws`);
-            ws.onmessage = function(event) {
-                const msg = JSON.parse(event.data);
-                if (!allHistory.some(h => h.timestamp === msg.timestamp)) {
-                    allHistory.push(msg.data);
-                    if (allHistory.length > 100) allHistory.shift();
-                }
-                updateDashboard();
-            };
+let ws;
+let chart;
+let currentType = 'All';
+let allHistory = [];
+let currentPage = 1;
+const rowsPerPage = 10;
+const historyPerPage = 5;
+const colors = {
+    'Solar': '#f39c12',
+    'Wind': '#2980b9',
+    'Battery': '#27ae60',
+    'Factory': '#7f8c8d',
+    'Hydro': '#3498db',
+    'Geothermal': '#8e44ad',
+    'Nuclear': '#e67e22'
+};
+const carbonFactors = {
+    'Solar': 0.05,
+    'Wind': 0.01,
+    'Battery': 0.02,
+    'Factory': 0.7,
+    'Hydro': 0.02,
+    'Geothermal': 0.04,
+    'Nuclear': 0.01
+};
+let map;
+let routeLayers = {};
+let anomalyMarkers = [];
+const routeCoords = {
+    'A': [ [39.93, 32.85], [39.95, 32.87] ],
+    'B': [ [39.93, 32.85], [39.92, 32.88] ],
+    'C': [ [39.93, 32.85], [39.91, 32.84] ],
+    'D': [ [39.93, 32.85], [39.96, 32.83] ]
+};
+let lastHistoryData = [];
+let lastAnomalyListData = [];
+let lastAnomalyData = [];
+function connectWS() {
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.onmessage = function(event) {
+        const msg = JSON.parse(event.data);
+        if (!allHistory.some(h => h.timestamp === msg.timestamp)) {
+            allHistory.push(msg.data);
+            if (allHistory.length > 100) allHistory.shift();
         }
-        function renderTablePage(page) {
-            const lastAll = allHistory.slice().reverse();
-            let allRows = [];
-            lastAll.forEach(d => {
-                Object.keys(colors).forEach(type => {
-                    if (d[type]) {
-                        allRows.push({
-                            timestamp: d.timestamp,
-                            type,
-                            route_name: d[type].route_name,
-                            value: d[type].value
-                        });
-                    }
-                });
-            });
-            // Anomali seti oluştur (son 10 zaman dilimi ve 1 std sapma ile)
-            let anomaliesSet = new Set();
-            Object.keys(colors).forEach(type => {
-                let typeData = [];
-                allHistory.slice(-10).forEach(d => {
-                    if (d[type]) typeData.push({
-                        value: d[type].value,
-                        route_name: d[type].route_name,
-                        timestamp: d.timestamp
-                    });
-                });
-                if (typeData.length > 2) {
-                    const mean = typeData.reduce((a,b) => a+b.value,0)/typeData.length;
-                    const std = Math.sqrt(typeData.reduce((a,b) => a+Math.pow(b.value-mean,2),0)/typeData.length);
-                    typeData.forEach(d => {
-                        if (Math.abs(d.value-mean) > 1*std) {
-                            anomaliesSet.add(`${d.timestamp}_${type}`);
-                        }
-                    });
-                }
-            });
-            const start = (page - 1) * rowsPerPage;
-            const end = start + rowsPerPage;
-            const pageRows = allRows.slice(start, end);
-            const tableBody = document.getElementById('dataTable');
-            tableBody.innerHTML = pageRows.map(row => {
-                const isAnomaly = anomaliesSet.has(`${row.timestamp}_${row.type}`);
-                return `
-                    <tr${isAnomaly ? " style='background:#ffeaea;color:#e74c3c;font-weight:bold;'" : ""}>
-                        <td>${row.timestamp}</td>
-                        <td>${row.type}</td>
-                        <td>${row.route_name}</td>
-                        <td>${row.value.toFixed(2)} kW</td>
-                    </tr>
-                `;
-            }).join('');
-            // Sayfalama butonları
-            const pageCount = Math.ceil(allRows.length / rowsPerPage);
-            let paginationHtml = '';
-            if (pageCount > 1) {
-                paginationHtml += `<button onclick=\"changePage(-1)\" ${page === 1 ? 'disabled' : ''}>Geri</button>`;
-                paginationHtml += ` Sayfa ${page} / ${pageCount} `;
-                paginationHtml += `<button onclick=\"changePage(1)\" ${page === pageCount ? 'disabled' : ''}>İleri</button>`;
-            }
-            document.getElementById('pagination').innerHTML = paginationHtml;
-        }
-        function changePage(delta) {
-            const lastAll = allHistory.slice().reverse();
-            let allRows = [];
-            lastAll.forEach(d => {
-                Object.keys(colors).forEach(type => {
-                    if (d[type]) {
-                        allRows.push({
-                            timestamp: d.timestamp,
-                            type,
-                            route_name: d[type].route_name,
-                            value: d[type].value
-                        });
-                    }
-                });
-            });
-            const pageCount = Math.ceil(allRows.length / rowsPerPage);
-            currentPage += delta;
-            if (currentPage < 1) currentPage = 1;
-            if (currentPage > pageCount) currentPage = pageCount;
-            renderTablePage(currentPage);
-        }
-        function updateDashboard() {
-            console.log("updateDashboard çağrıldı");
-            // Ortak zaman ekseni
-            const labels = allHistory.map(h => h.timestamp);
-            if (!chart) {
-                const ctx = document.getElementById('chart').getContext('2d');
-                chart = new Chart(ctx, {
-                    type: 'line',
-                    data: { labels: [], datasets: [] },
-                    options: {
-                        responsive: true,
-                        plugins: { legend: { display: true } },
-                        scales: { x: { display: true }, y: { beginAtZero: false } },
-                        animation: {
-                            duration: 2000,
-                            easing: 'easeInOutQuad'
-                        }
-                    }
+        updateDashboard();
+    };
+}
+function renderTablePage(page) {
+    const lastAll = allHistory.slice().reverse();
+    let allRows = [];
+    lastAll.forEach(d => {
+        Object.keys(colors).forEach(type => {
+            if (d[type]) {
+                allRows.push({
+                    timestamp: d.timestamp,
+                    type,
+                    route_name: d[type].route_name,
+                    value: d[type].value,
+                    outgoing: d[type].outgoing,
+                    loss: d[type].loss
                 });
             }
-            chart.data.labels = labels;
-            chart.data.datasets = [];
-            if (currentType === 'All') {
-                Object.keys(colors).forEach(type => {
-                    const data = allHistory.map(h => h[type] ? h[type].value : null);
-                    chart.data.datasets.push({
-                        label: type + ' (kW)',
-                        data,
-                        borderColor: colors[type],
-                        backgroundColor: 'rgba(0,0,0,0)',
-                        tension: 0.2,
-                        pointRadius: 4
-                    });
-                });
-            } else {
-                const data = allHistory.map(h => h[currentType] ? h[currentType].value : null);
-                chart.data.datasets = [{
-                    label: currentType + ' (kW)',
-                    data,
-                    borderColor: colors[currentType],
-                    backgroundColor: 'rgba(0,0,0,0)',
-                    tension: 0.2,
-                    pointRadius: 4
-                }];
-            }
-            chart.update();
-            chart.options.scales.y.title = { display: true, text: 'Enerji Değeri (kW)' };
-            // İstatistikler
-            let values = [];
-            allHistory.forEach(d => {
-                Object.keys(colors).forEach(type => {
-                    if (d[type]) values.push(d[type].value);
-                });
-            });
-            const total = values.reduce((a, b) => a + b, 0).toFixed(2);
-            const avg = values.length ? (total / values.length).toFixed(2) : 0;
-            document.getElementById('totalCount').textContent = `Toplam: ${total}`;
-            document.getElementById('avgValue').textContent = `Ortalama: ${avg}`;
-            // Enerji tipi ve rota bazlı en verimli rotalar paneli
-            showBestRoutesPanel();
-            // Anomali tespiti (basit: ortalamadan 2 std sapma)
-            let anomalyList = [];
-            let anomalyTimestamps = new Set();
-            Object.keys(colors).forEach(type => {
-                const typeData = allHistory.filter(d => d.energy_type === type);
-                if (typeData.length > 5) {
-                    const mean = typeData.reduce((a,b) => a+b.value,0)/typeData.length;
-                    const std = Math.sqrt(typeData.reduce((a,b) => a+Math.pow(b.value-mean,2),0)/typeData.length);
-                    typeData.forEach(d => {
-                        // TEST: Anomali koşulunu her zaman true yap
-                        if (true) {
-                            console.log("ANOMALİ TESPİT EDİLDİ", d, type, mean, std);
-                            anomalyList.push({type, value: d.value, timestamp: d.timestamp});
-                            anomalyTimestamps.add(d.timestamp + d.energy_type);
-
-                            console.log('Anomali tespit edildi, POST atılıyor:', {
-                                timestamp: new Date().toISOString().slice(0, 19),
-                                energy_type: type,
-                                route_name: d.route_name,
-                                value: d.value
-                            });
-
-                            fetch('/api/anomalies', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    timestamp: new Date().toISOString().slice(0, 19),
-                                    energy_type: type,
-                                    route_name: d.route_name,
-                                    value: d.value
-                                })
-                            })
-                            .then(response => {
-                                if (!response.ok) {
-                                    console.error('Anomali POST hatası:', response.status, response.statusText);
-                                } else {
-                                    console.log('Anomali başarıyla kaydedildi:', d);
-                                }
-                                return response.json();
-                            })
-                            .then(data => {
-                                if (data && data.error) {
-                                    console.error('Anomali POST API error:', data.error);
-                                }
-                            })
-                            .catch(err => {
-                                console.error('Anomali POST fetch error:', err);
-                            });
-                        }
-                    });
-                }
-            });
-            if (anomalyList.length > 0) {
-                document.getElementById('anomalyAlert').style.display = '';
-                document.getElementById('anomalyAlert').textContent = `Uyarı: ${anomalyList.length} anomali tespit edildi!`;
-                document.getElementById('anomalyList').style.display = '';
-                document.getElementById('anomalyList').innerHTML = `<span class='anomaly-list-title'>Anomali Listesi:</span>` + anomalyList.map(a => `${a.type.toUpperCase()} | Değer: ${a.value.toFixed(2)} kW | Zaman: ${a.timestamp}`).join('<br>');
-            } else {
-                document.getElementById('anomalyAlert').style.display = 'none';
-                document.getElementById('anomalyList').style.display = 'none';
-            }
-            // Tablo
-            renderTablePage(currentPage);
-            showBestRoutesPanel();
-            showAnomalyPagedList();
-        }
-        document.getElementById('energyType').addEventListener('change', function() {
-            currentType = this.value;
-            if (chart) { chart.destroy(); chart = null; }
-            updateDashboard();
         });
-        connectWS();
-        // Yıl, ay, gün dropdownlarını doldur
-        function fillDateDropdowns() {
-            const yearSel = document.getElementById('filterYear');
-            const monthSel = document.getElementById('filterMonth');
-            const daySel = document.getElementById('filterDay');
-            const now = new Date();
-            yearSel.innerHTML = '<option value="">Tümü</option>';
-            for (let y = now.getFullYear(); y >= 2022; y--) {
-                yearSel.innerHTML += `<option value="${y}">${y}</option>`;
-            }
-            monthSel.innerHTML = '<option value="">Tümü</option>';
-            for (let m = 1; m <= 12; m++) {
-                monthSel.innerHTML += `<option value="${m.toString().padStart(2,'0')}">${m.toString().padStart(2,'0')}</option>`;
-            }
-            daySel.innerHTML = '<option value="">Tümü</option>';
-            for (let d = 1; d <= 31; d++) {
-                daySel.innerHTML += `<option value="${d.toString().padStart(2,'0')}">${d.toString().padStart(2,'0')}</option>`;
-            }
+    });
+    // Anomali seti oluştur (son 10 zaman dilimi ve 1 std sapma ile)
+    let anomaliesSet = new Set();
+    Object.keys(colors).forEach(type => {
+        let typeData = [];
+        allHistory.slice(-10).forEach(d => {
+            if (d[type]) typeData.push({
+                value: d[type].value,
+                route_name: d[type].route_name,
+                timestamp: d.timestamp
+            });
+        });
+        if (typeData.length > 2) {
+            const mean = typeData.reduce((a,b) => a+b.value,0)/typeData.length;
+            const std = Math.sqrt(typeData.reduce((a,b) => a+Math.pow(b.value-mean,2),0)/typeData.length);
+            typeData.forEach(d => {
+                if (Math.abs(d.value-mean) > 1*std) {
+                    anomaliesSet.add(`${d.timestamp}_${type}`);
+                }
+            });
         }
-        fillDateDropdowns();
-        async function fetchHistory() {
-            const type = document.getElementById('filterEnergyType').value;
-            const route = document.getElementById('filterRouteName').value;
-            const year = document.getElementById('filterYear').value;
-            const month = document.getElementById('filterMonth').value;
-            const day = document.getElementById('filterDay').value;
-            let start = "", end = "";
-            if (year && month && day) {
-                start = `${year}-${month}-${day}T00:00:00`;
-                end = `${year}-${month}-${day}T23:59:59`;
-            } else if (year && month) {
-                start = `${year}-${month}-01T00:00:00`;
-                end = `${year}-${month}-31T23:59:59`;
-            } else if (year) {
-                start = `${year}-01-01T00:00:00`;
-                end = `${year}-12-31T23:59:59`;
-            } else if (month && day) {
-                start = `2022-${month}-${day}T00:00:00`;
-                end = `2025-${month}-${day}T23:59:59`;
-            } else if (month) {
-                start = `2022-${month}-01T00:00:00`;
-                end = `2025-${month}-31T23:59:59`;
-            } else if (day) {
-                start = `2022-01-${day}T00:00:00`;
-                end = `2025-12-${day}T23:59:59`;
+    });
+    const start = (page - 1) * rowsPerPage;
+    const end = start + rowsPerPage;
+    const pageRows = allRows.slice(start, end);
+    const tableBody = document.getElementById('dataTable');
+    tableBody.innerHTML = pageRows.map(row => {
+        const isAnomaly = anomaliesSet.has(`${row.timestamp}_${row.type}`);
+        return `
+            <tr${isAnomaly ? " style='background:#ffeaea;color:#e74c3c;font-weight:bold;'" : ""}>
+                <td>${row.timestamp}</td>
+                <td>${row.type}</td>
+                <td>${row.route_name}</td>
+                <td>${row.value !== undefined ? row.value.toFixed(2) : '-'} kW</td>
+                <td>${(typeof row.outgoing === 'number' && !isNaN(row.outgoing)) ? row.outgoing.toFixed(2) : '-'} kW</td>
+                <td>${(typeof row.loss === 'number' && !isNaN(row.loss)) ? row.loss.toFixed(2) : '-'} kW</td>
+            </tr>
+        `;
+    }).join('');
+    // Sayfalama butonları
+    const pageCount = Math.ceil(allRows.length / rowsPerPage);
+    let paginationHtml = '';
+    if (pageCount > 1) {
+        paginationHtml += `<button onclick=\"changePage(-1)\" ${page === 1 ? 'disabled' : ''}>Geri</button>`;
+        paginationHtml += ` Sayfa ${page} / ${pageCount} `;
+        paginationHtml += `<button onclick=\"changePage(1)\" ${page === pageCount ? 'disabled' : ''}>İleri</button>`;
+    }
+    document.getElementById('pagination').innerHTML = paginationHtml;
+}
+function changePage(delta) {
+    const lastAll = allHistory.slice().reverse();
+    let allRows = [];
+    lastAll.forEach(d => {
+        Object.keys(colors).forEach(type => {
+            if (d[type]) {
+                allRows.push({
+                    timestamp: d.timestamp,
+                    type,
+                    route_name: d[type].route_name,
+                    value: d[type].value,
+                    outgoing: d[type].outgoing,
+                    loss: d[type].loss
+                });
             }
-            let url = `/api/history?`;
-            if (type) url += `energy_type=${encodeURIComponent(type)}&`;
-            if (route) url += `route_name=${encodeURIComponent(route)}&`;
-            if (start) url += `start=${start}&`;
-            if (end) url += `end=${end}&`;
-            const resp = await fetch(url);
-            let data;
-            try {
-                data = await resp.json();
-            } catch (e) {
-                document.getElementById('historyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucudan geçersiz veri alındı.</td></tr>`;
-                return;
-            }
-            if (data.error) {
-                document.getElementById('historyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucu hatası: ${data.error}</td></tr>`;
-                return;
-            }
-            if (!data.data) {
-                document.getElementById('historyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Veri bulunamadı.</td></tr>`;
-                return;
-            }
-            const table = document.getElementById('historyTable');
-            table.innerHTML = data.data.map(d => `
-                <tr>
-                  <td>${d.timestamp.replace('T',' ').slice(0,19)}</td>
-                  <td>${d.energy_type}</td>
-                  <td>${d.route_name}</td>
-                  <td>${d.value.toFixed(2)} kW</td>
-                </tr>
-            `).join('');
-        }
-        // Sayfa açıldığında geçmiş verileri getir
-        fetchHistory();
-        // Enerji tipi ve rota bazlı en verimli rotaları analiz edip gösteren fonksiyon
-        function showBestRoutesPanel() {
-            // Son 100 veriyi al
-            const lastN = allHistory.slice(-100);
-            const types = Object.keys(colors);
-            let html = `<b>Enerji Tipi ve Rota Bazlı En Verimli Rotalar (Son 100 veri üzerinden hesaplanır):</b><br>`;
-            let found = false;
-            types.forEach(type => {
-                // Bu enerji tipindeki veriler
-                let typeData = [];
-                lastN.forEach(d => {
-                    if (d[type]) typeData.push({
+        });
+    });
+    const pageCount = Math.ceil(allRows.length / rowsPerPage);
+    currentPage += delta;
+    if (currentPage < 1) currentPage = 1;
+    if (currentPage > pageCount) currentPage = pageCount;
+    renderTablePage(currentPage);
+}
+function updateDashboard() {
+    // --- METRİK SEÇİMİ ---
+    const selectedMetric = document.getElementById('metricSelect').value;
+    let chartData = {};
+    Object.keys(colors).forEach(type => { chartData[type] = 0; });
+    if (selectedMetric === 'anomaly') {
+        Object.keys(colors).forEach(type => {
+            let typeData = [];
+            allHistory.forEach(d => {
+                if (d[type]) {
+                    typeData.push({
                         value: d[type].value,
                         route_name: d[type].route_name,
                         timestamp: d.timestamp
                     });
-                });
-                if (typeData.length === 0) return;
-                // Rotalara göre grupla
-                const routeGroups = {};
-                typeData.forEach(d => {
-                    if (!routeGroups[d.route_name]) routeGroups[d.route_name] = [];
-                    routeGroups[d.route_name].push(d);
-                });
-                // Her rota için ortalama ve anomali sayısı
-                let bestRoute = null;
-                let bestAvg = -Infinity;
-                let bestAnomaly = 0;
-                for (const route in routeGroups) {
-                    const values = routeGroups[route].map(x => x.value);
-                    const avg = values.reduce((a,b) => a+b,0)/values.length;
-                    // Anomali sayısı (2 std sapma üstü)
-                    const mean = avg;
-                    const std = Math.sqrt(values.reduce((a,b) => a+Math.pow(b-mean,2),0)/values.length);
-                    const anomalyCount = routeGroups[route].filter(x => Math.abs(x.value-mean) > 2*std).length;
-                    if (avg > bestAvg) {
-                        bestAvg = avg;
-                        bestRoute = route;
-                        bestAnomaly = anomalyCount;
-                    }
-                }
-                if (bestRoute) {
-                    html += `<span style=\"font-weight:bold;\">Enerji Tipi: <span style='color:${colors[type]};'>${type.toUpperCase()}</span></span> | En Verimli Rota: <span style='color:#16a085;font-weight:bold;'>${bestRoute}</span> (Ortalama: ${bestAvg.toFixed(2)}, Anomali: ${bestAnomaly})<br>`;
-                    found = true;
                 }
             });
-            html += `<span style='font-size:0.95em;color:#555;'>Not: Bu analiz, her enerji tipi ve rota için son 100 verinin ortalamasına ve anomali sayısına göre yapılır.</span>`;
-            const panel = document.getElementById('bestRoutesPanel');
-            panel.innerHTML = html;
-            panel.style.display = found ? '' : 'none';
-        }
-        // 5'li 5'li sayfalı anomali listesi
-        let anomalyPage = 1;
-        const anomaliesPerPage = 5;
-        function showAnomalyPagedList() {
-            // Son 100 verideki anomalileri topla
-            const lastN = allHistory.slice(-100);
-            let anomalies = [];
+            chartData[type] = typeData.length;
+        });
+    } else if (selectedMetric === 'production') {
+        allHistory.forEach(d => {
             Object.keys(colors).forEach(type => {
-                let typeData = [];
-                lastN.forEach(d => {
-                    if (d[type]) typeData.push({
-                        value: d[type].value,
-                        route_name: d[type].route_name,
-                        timestamp: d.timestamp
-                    });
+                if (d[type] && typeof d[type].value === 'number') chartData[type] += d[type].value;
+            });
+        });
+    } else if (selectedMetric === 'loss') {
+        allHistory.forEach(d => {
+            Object.keys(colors).forEach(type => {
+                if (d[type] && typeof d[type].loss === 'number') chartData[type] += d[type].loss;
+            });
+        });
+    } else if (selectedMetric === 'outgoing') {
+        allHistory.forEach(d => {
+            Object.keys(colors).forEach(type => {
+                if (d[type] && typeof d[type].outgoing === 'number') chartData[type] += d[type].outgoing;
+            });
+        });
+    }
+    // --- KALAN DASHBOARD KODLARI (her zaman çalışacak) ---
+    // İstatistikler
+    let values = [];
+    allHistory.forEach(d => {
+        Object.keys(colors).forEach(type => {
+            if (d[type]) values.push(d[type].value);
+        });
+    });
+    const total = values.reduce((a, b) => a + b, 0).toFixed(2);
+    const avg = values.length ? (total / values.length).toFixed(2) : 0;
+    document.getElementById('totalCount').textContent = `Toplam: ${total}`;
+    document.getElementById('avgValue').textContent = `Ortalama: ${avg}`;
+    // Enerji tipi ve rota bazlı en verimli rotalar paneli
+    showBestRoutesPanel();
+    // Anomali uyarı ve liste
+    let anomalyList = [];
+    let anomalyTimestamps = new Set();
+    Object.keys(colors).forEach(type => {
+        let typeData = [];
+        allHistory.forEach(d => {
+            if (d[type]) {
+                typeData.push({
+                    value: d[type].value,
+                    route_name: d[type].route_name,
+                    timestamp: d.timestamp
                 });
-                if (typeData.length > 2) {
-                    const mean = typeData.reduce((a,b) => a+b.value,0)/typeData.length;
-                    const std = Math.sqrt(typeData.reduce((a,b) => a+Math.pow(b.value-mean,2),0)/typeData.length);
-                    typeData.forEach(d => {
-                        if (Math.abs(d.value-mean) > 1*std) {
-                            anomalies.push({
-                                type,
-                                value: d.value,
-                                route_name: d.route_name,
-                                timestamp: d.timestamp
-                            });
-                        }
-                    });
+            }
+        });
+        if (typeData.length > 5) {
+            const mean = typeData.reduce((a,b) => a+b.value,0)/typeData.length;
+            const std = Math.sqrt(typeData.reduce((a,b) => a+Math.pow(b.value-mean,2),0)/typeData.length);
+            typeData.forEach(d => {
+                // TEST: Anomali koşulunu her zaman true yap
+                if (true) {
+                    anomalyList.push({type, value: d.value, timestamp: d.timestamp});
+                    anomalyTimestamps.add(d.timestamp + type);
                 }
             });
-            // Tarihe göre yeni gelen en üstte
-            anomalies = anomalies.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-            // Sayfalama
-            const pageCount = Math.ceil(anomalies.length / anomaliesPerPage);
-            if (anomalyPage > pageCount) anomalyPage = pageCount;
-            if (anomalyPage < 1) anomalyPage = 1;
-            const start = (anomalyPage - 1) * anomaliesPerPage;
-            const end = start + anomaliesPerPage;
-            const pageAnomalies = anomalies.slice(start, end);
-            const anomalyDiv = document.getElementById('anomalyPagedList');
-            if (pageAnomalies.length > 0) {
-                anomalyDiv.style.display = '';
-                anomalyDiv.innerHTML = `<div style="background:#ffeaea;border:2px solid #e74c3c;color:#e74c3c;padding:10px 15px;border-radius:8px;margin-top:10px;">
-                    <b>Son 100 veride tespit edilen anomaliler:</b><br>
-                    ${pageAnomalies.map(a => `${a.timestamp} | <b>${a.type}</b> | Rota: ${a.route_name} | Değer: ${a.value.toFixed(2)} kW`).join('<br>')}
-                    <div style='margin-top:8px;'>
-                        <button onclick='changeAnomalyPage(-1)' ${anomalyPage === 1 ? 'disabled' : ''}>Geri</button>
-                        Sayfa ${anomalyPage} / ${pageCount}
-                        <button onclick='changeAnomalyPage(1)' ${anomalyPage === pageCount ? 'disabled' : ''}>İleri</button>
-                    </div>
-                </div>`;
-            } else {
-                anomalyDiv.style.display = 'none';
-                anomalyDiv.innerHTML = '';
+        }
+    });
+    if (anomalyList.length > 0) {
+        document.getElementById('anomalyAlert').style.display = '';
+        document.getElementById('anomalyAlert').textContent = `Uyarı: ${anomalyList.length} anomali tespit edildi!`;
+        document.getElementById('anomalyList').style.display = '';
+        lastAnomalyListData = anomalyList;
+        renderAnomalyListPage(1);
+    } else {
+        document.getElementById('anomalyAlert').style.display = 'none';
+        document.getElementById('anomalyList').style.display = 'none';
+    }
+    // Tablo
+    renderTablePage(currentPage);
+    showBestRoutesPanel();
+}
+document.getElementById('energyType').addEventListener('change', function() {
+    currentType = this.value;
+    if (chart) { chart.destroy(); chart = null; }
+    updateDashboard();
+});
+document.getElementById('metricSelect').addEventListener('change', function() {
+    if (chart) { chart.destroy(); chart = null; }
+    updateDashboard();
+});
+connectWS();
+// Yıl, ay, gün dropdownlarını doldur
+function fillDateDropdowns() {
+    const yearSel = document.getElementById('filterYear');
+    const monthSel = document.getElementById('filterMonth');
+    const daySel = document.getElementById('filterDay');
+    const now = new Date();
+    yearSel.innerHTML = '<option value="">Tümü</option>';
+    for (let y = now.getFullYear(); y >= 2022; y--) {
+        yearSel.innerHTML += `<option value="${y}">${y}</option>`;
+    }
+    monthSel.innerHTML = '<option value="">Tümü</option>';
+    for (let m = 1; m <= 12; m++) {
+        monthSel.innerHTML += `<option value="${m.toString().padStart(2,'0')}">${m.toString().padStart(2,'0')}</option>`;
+    }
+    daySel.innerHTML = '<option value="">Tümü</option>';
+    for (let d = 1; d <= 31; d++) {
+        daySel.innerHTML += `<option value="${d.toString().padStart(2,'0')}">${d.toString().padStart(2,'0')}</option>`;
+    }
+}
+fillDateDropdowns();
+function fillAnomalyMonthDayDropdowns() {
+    const monthSel = document.getElementById('anomalyMonth');
+    const daySel = document.getElementById('anomalyDay');
+    if (!monthSel || !daySel) return;
+    monthSel.innerHTML = '<option value="">Tümü</option>';
+    for (let m = 1; m <= 12; m++) {
+        monthSel.innerHTML += `<option value="${m.toString().padStart(2,'0')}">${m.toString().padStart(2,'0')}</option>`;
+    }
+    daySel.innerHTML = '<option value="">Tümü</option>';
+    for (let d = 1; d <= 31; d++) {
+        daySel.innerHTML += `<option value="${d.toString().padStart(2,'0')}">${d.toString().padStart(2,'0')}</option>`;
+    }
+}
+let historyPage = 1;
+function renderHistoryTablePage(page) {
+    const pageCount = Math.ceil(lastHistoryData.length / historyPerPage);
+    if (page < 1) page = 1;
+    if (page > pageCount) page = pageCount;
+    historyPage = page;
+    const start = (page - 1) * historyPerPage;
+    const end = start + historyPerPage;
+    const pageRows = lastHistoryData.slice(start, end);
+    console.log('[DEBUG] renderHistoryTablePage pageRows:', pageRows);
+    const table = document.getElementById('historyTable');
+    table.innerHTML = pageRows.map(d => `
+        <tr>
+          <td>${d.timestamp.replace('T',' ').slice(0,19)}</td>
+          <td>${d.energy_type}</td>
+          <td>${d.route_name}</td>
+          <td>${d.value !== undefined ? d.value.toFixed(2) : '-'} kW</td>
+          <td>${(typeof d.outgoing === 'number' && !isNaN(d.outgoing)) ? d.outgoing.toFixed(2) : '-'} kW</td>
+          <td>${(typeof d.loss === 'number' && !isNaN(d.loss)) ? d.loss.toFixed(2) : '-'} kW</td>
+          <td>${(typeof d.storage === 'number' && !isNaN(d.storage)) ? d.storage.toFixed(2) : '-'} kW</td>
+        </tr>
+    `).join('');
+    // Sayfalama butonları
+    let paginationHtml = '';
+    if (pageCount > 1) {
+        paginationHtml += `<button onclick="changeHistoryPage(-1)" ${page === 1 ? 'disabled' : ''}>Geri</button>`;
+        paginationHtml += ` Sayfa ${page} / ${pageCount} `;
+        paginationHtml += `<button onclick="changeHistoryPage(1)" ${page === pageCount ? 'disabled' : ''}>İleri</button>`;
+    }
+    document.getElementById('historyPaginationTop').innerHTML = paginationHtml;
+    document.getElementById('historyPaginationBottom').innerHTML = paginationHtml;
+    renderComboSuggestion();
+    renderCarbonTable();
+    renderLossTable();
+    // Anomali verilerini haritaya yansıt
+    if (typeof lastAnomalyData !== 'undefined') {
+        updateMapWithAnomalies(lastAnomalyData);
+    }
+    // Otomatik öneri kutusu için summary ve anomalyTypes'ı loss tablosundan al
+    if (typeof renderLossTable.summary !== 'undefined' && typeof renderLossTable.anomalyTypes !== 'undefined') {
+        renderAutoAdvice(renderLossTable.summary, renderLossTable.anomalyTypes);
+    }
+}
+function changeHistoryPage(delta) {
+    renderHistoryTablePage(historyPage + delta);
+}
+async function fetchHistory() {
+    const type = document.getElementById('filterEnergyType').value;
+    const route = document.getElementById('filterRouteName').value;
+    const year = document.getElementById('filterYear').value;
+    const month = document.getElementById('filterMonth').value;
+    const day = document.getElementById('filterDay').value;
+    let start = "", end = "";
+    if (year && month && day) {
+        start = `${year}-${month}-${day}T00:00:00`;
+        end = `${year}-${month}-${day}T23:59:59`;
+    } else if (year && month) {
+        start = `${year}-${month}-01T00:00:00`;
+        end = `${year}-${month}-31T23:59:59`;
+    } else if (year) {
+        start = `${year}-01-01T00:00:00`;
+        end = `${year}-12-31T23:59:59`;
+    } else if (month && day) {
+        start = `2022-${month}-${day}T00:00:00`;
+        end = `2025-${month}-${day}T23:59:59`;
+    } else if (month) {
+        start = `2022-${month}-01T00:00:00`;
+        end = `2025-${month}-31T23:59:59`;
+    } else if (day) {
+        start = `2022-01-${day}T00:00:00`;
+        end = `2025-12-${day}T23:59:59`;
+    }
+    let url = `/api/history?`;
+    if (type) url += `energy_type=${encodeURIComponent(type)}&`;
+    if (route) url += `route_name=${encodeURIComponent(route)}&`;
+    if (start) url += `start=${start}&`;
+    if (end) url += `end=${end}&`;
+    const resp = await fetch(url);
+    let data;
+    try {
+        data = await resp.json();
+        console.log('[DEBUG] /api/history response:', data);
+    } catch (e) {
+        document.getElementById('historyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucudan geçersiz veri alındı.</td></tr>`;
+        document.getElementById('historyPaginationTop').innerHTML = '';
+        document.getElementById('historyPaginationBottom').innerHTML = '';
+        return;
+    }
+    if (data.error) {
+        document.getElementById('historyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucu hatası: ${data.error}</td></tr>`;
+        document.getElementById('historyPaginationTop').innerHTML = '';
+        document.getElementById('historyPaginationBottom').innerHTML = '';
+        return;
+    }
+    if (!data.data) {
+        document.getElementById('historyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Veri bulunamadı.</td></tr>`;
+        document.getElementById('historyPaginationTop').innerHTML = '';
+        document.getElementById('historyPaginationBottom').innerHTML = '';
+        return;
+    }
+    lastHistoryData = data.data;
+    renderHistoryTablePage(1);
+}
+// Sayfa açıldığında geçmiş verileri getir
+fetchHistory();
+// Enerji tipi ve rota bazlı en verimli rotaları analiz edip gösteren fonksiyon
+function showBestRoutesPanel() {
+    // Son 100 veriyi al
+    const lastN = allHistory.slice(-100);
+    const types = Object.keys(colors);
+    let html = `<b>Enerji Tipi ve Rota Bazlı En Verimli Rotalar (Son 100 veri üzerinden hesaplanır):</b><br>`;
+    let found = false;
+    types.forEach(type => {
+        // Bu enerji tipindeki veriler
+        let typeData = [];
+        lastN.forEach(d => {
+            if (d[type]) typeData.push({
+                value: d[type].value,
+                route_name: d[type].route_name,
+                timestamp: d.timestamp
+            });
+        });
+        if (typeData.length === 0) return;
+        // Rotalara göre grupla
+        const routeGroups = {};
+        typeData.forEach(d => {
+            if (!routeGroups[d.route_name]) routeGroups[d.route_name] = [];
+            routeGroups[d.route_name].push(d);
+        });
+        // Her rota için ortalama ve anomali sayısı
+        let bestRoute = null;
+        let bestAvg = -Infinity;
+        let bestAnomaly = 0;
+        for (const route in routeGroups) {
+            const values = routeGroups[route].map(x => x.value);
+            const avg = values.reduce((a,b) => a+b,0)/values.length;
+            // Anomali sayısı (2 std sapma üstü)
+            const mean = avg;
+            const std = Math.sqrt(values.reduce((a,b) => a+Math.pow(b-mean,2),0)/values.length);
+            const anomalyCount = routeGroups[route].filter(x => Math.abs(x.value-mean) > 2*std).length;
+            if (avg > bestAvg) {
+                bestAvg = avg;
+                bestRoute = route;
+                bestAnomaly = anomalyCount;
             }
         }
-        function changeAnomalyPage(delta) {
-            anomalyPage += delta;
-            showAnomalyPagedList();
+        if (bestRoute) {
+            html += `<span style=\"font-weight:bold;\">Enerji Tipi: <span style='color:${colors[type]};'>${type.toUpperCase()}</span></span> | En Verimli Rota: <span style='color:#16a085;font-weight:bold;'>${bestRoute}</span> (Ortalama: ${bestAvg.toFixed(2)}, Anomali: ${bestAnomaly})<br>`;
+            found = true;
         }
-        // Anomali filtre dropdownlarını doldur
-        function fillAnomalyDateDropdowns() {
-            const yearSel = document.getElementById('anomalyYear');
-            const monthSel = document.getElementById('anomalyMonth');
-            const daySel = document.getElementById('anomalyDay');
-            const now = new Date();
-            yearSel.innerHTML = '<option value="">Tümü</option>';
-            for (let y = now.getFullYear(); y >= 2022; y--) {
-                yearSel.innerHTML += `<option value="${y}">${y}</option>`;
+    });
+    html += `<span style='font-size:0.95em;color:#555;'>Not: Bu analiz, her enerji tipi ve rota için son 100 verinin ortalamasına ve anomali sayısına göre yapılır.</span>`;
+    const panel = document.getElementById('bestRoutesPanel');
+    panel.innerHTML = html;
+    panel.style.display = found ? '' : 'none';
+}
+// 5'li 5'li sayfalı anomali listesi
+let anomalyListPage = 1;
+const anomalyListPerPage = 10;
+function renderAnomalyListPage(page) {
+    const pageCount = Math.ceil(lastAnomalyListData.length / anomalyListPerPage);
+    if (page < 1) page = 1;
+    if (page > pageCount) page = pageCount;
+    anomalyListPage = page;
+    const start = (page - 1) * anomalyListPerPage;
+    const end = start + anomalyListPerPage;
+    const pageRows = lastAnomalyListData.slice(start, end);
+    let html = `<span class='anomaly-list-title'>Anomali Listesi:</span>`;
+    html += pageRows.map(a => `${a.type ? a.type.toUpperCase() : a.energy_type.toUpperCase()} | Değer: ${a.value.toFixed(2)} kW | Zaman: ${a.timestamp}`).join('<br>');
+    // Sayfalama butonları
+    let paginationHtml = '';
+    if (pageCount > 1) {
+        paginationHtml += `<button onclick="changeAnomalyListPage(-1)" ${page === 1 ? 'disabled' : ''}>Geri</button>`;
+        paginationHtml += ` Sayfa ${page} / ${pageCount} `;
+        paginationHtml += `<button onclick="changeAnomalyListPage(1)" ${page === pageCount ? 'disabled' : ''}>İleri</button>`;
+    }
+    document.getElementById('anomalyList').innerHTML = paginationHtml + html + paginationHtml;
+}
+function changeAnomalyListPage(delta) {
+    renderAnomalyListPage(anomalyListPage + delta);
+}
+// Sayfa açıldığında anomalileri otomatik getir
+async function fetchAnomalies() {
+    const month = document.getElementById('anomalyMonth').value;
+    const day = document.getElementById('anomalyDay').value;
+    let url = `/api/anomalies?`;
+    if (month && day) {
+        url += `month=${parseInt(month)}&day=${parseInt(day)}&`;
+    } else if (month) {
+        url += `month=${parseInt(month)}&`;
+    } else if (day) {
+        url += `day=${parseInt(day)}&`;
+    }
+    const resp = await fetch(url);
+    let data;
+    try {
+        data = await resp.json();
+    } catch (e) {
+        document.getElementById('anomalyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucudan geçersiz veri alındı.</td></tr>`;
+        document.getElementById('anomalyPaginationTop').innerHTML = '';
+        document.getElementById('anomalyPaginationBottom').innerHTML = '';
+        return;
+    }
+    if (data.error) {
+        document.getElementById('anomalyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucu hatası: ${data.error}</td></tr>`;
+        document.getElementById('anomalyPaginationTop').innerHTML = '';
+        document.getElementById('anomalyPaginationBottom').innerHTML = '';
+        return;
+    }
+    if (!data.data) {
+        document.getElementById('anomalyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Veri bulunamadı.</td></tr>`;
+        document.getElementById('anomalyPaginationTop').innerHTML = '';
+        document.getElementById('anomalyPaginationBottom').innerHTML = '';
+        return;
+    }
+    lastAnomalyData = data.data;
+    renderAnomalyTablePage(1);
+}
+let anomalyPage = 1;
+const anomaliesPerPage = 10;
+function renderAnomalyTablePage(page) {
+    const pageCount = Math.ceil(lastAnomalyData.length / anomaliesPerPage);
+    if (page < 1) page = 1;
+    if (page > pageCount) page = pageCount;
+    anomalyPage = page;
+    const start = (page - 1) * anomaliesPerPage;
+    const end = start + anomaliesPerPage;
+    const pageRows = lastAnomalyData.slice(start, end);
+    const table = document.getElementById('anomalyTable');
+    table.innerHTML = pageRows.map(d => `
+        <tr>
+          <td>${d.timestamp.replace('T',' ').slice(0,19)}</td>
+          <td>${d.energy_type}</td>
+          <td>${d.route_name}</td>
+          <td>${d.value !== undefined ? d.value.toFixed(2) : '-'} kW</td>
+          <td>${(typeof d.outgoing === 'number' && !isNaN(d.outgoing)) ? d.outgoing.toFixed(2) : '-'} kW</td>
+          <td>${(typeof d.loss === 'number' && !isNaN(d.loss)) ? d.loss.toFixed(2) : '-'} kW</td>
+        </tr>
+    `).join('');
+    // Sayfalama butonları
+    let paginationHtml = '';
+    if (pageCount > 1) {
+        paginationHtml += `<button onclick="changeAnomalyPage(-1)" ${page === 1 ? 'disabled' : ''}>Geri</button>`;
+        paginationHtml += ` Sayfa ${page} / ${pageCount} `;
+        paginationHtml += `<button onclick="changeAnomalyPage(1)" ${page === pageCount ? 'disabled' : ''}>İleri</button>`;
+    }
+    document.getElementById('anomalyPaginationTop').innerHTML = paginationHtml;
+    document.getElementById('anomalyPaginationBottom').innerHTML = paginationHtml;
+}
+function changeAnomalyPage(delta) {
+    renderAnomalyTablePage(anomalyPage + delta);
+}
+function renderCarbonTable() {
+    // Enerji tipi ve rota bazında karbon yüzdesi hesapla
+    const summary = {};
+    let totalCarbon = 0;
+    const allRoutes = new Set();
+    lastHistoryData.forEach(d => {
+        const type = d.energy_type;
+        const route = d.route_name;
+        const value = d.value;
+        const factor = carbonFactors[type] || 0;
+        const carbon = value * factor;
+        if (!summary[type]) summary[type] = {};
+        if (!summary[type][route]) summary[type][route] = 0;
+        summary[type][route] += carbon;
+        totalCarbon += carbon;
+        allRoutes.add(route);
+    });
+    const routes = Array.from(allRoutes).sort();
+    // Tablo HTML
+    let html = `<h3 style='margin-top:20px;'>Karbon Yüzdesi Tablosu</h3>`;
+    html += `<table style='width:100%;margin-bottom:20px;'><thead><tr><th>Enerji Tipi</th>`;
+    routes.forEach(route => { html += `<th>${route}</th>`; });
+    html += `</tr></thead><tbody>`;
+    Object.keys(summary).forEach(type => {
+        html += `<tr><td>${type}</td>`;
+        routes.forEach(route => {
+            const carbon = summary[type][route] || 0;
+            const percent = totalCarbon > 0 ? (carbon / totalCarbon * 100).toFixed(2) : '0.00';
+            html += `<td>${percent}</td>`;
+        });
+        html += `</tr>`;
+    });
+    html += `</tbody></table>`;
+    let maxPercent = -1, minPercent = 101;
+    let maxInfo = '', minInfo = '';
+    Object.keys(summary).forEach(type => {
+        routes.forEach(route => {
+            const carbon = summary[type][route] || 0;
+            const percent = totalCarbon > 0 ? (carbon / totalCarbon * 100) : 0;
+            if (percent > maxPercent) { maxPercent = percent; maxInfo = `${type} / ${route}`; }
+            if (percent < minPercent) { minPercent = percent; minInfo = `${type} / ${route}`; }
+        });
+    });
+    if (totalCarbon > 0) {
+        html += `<div style='margin-bottom:20px;font-size:1.05em;'><b>En kirli kaynak/rota:</b> ${maxInfo} (%${maxPercent.toFixed(2)})<br><b>En temiz kaynak/rota:</b> ${minInfo} (%${minPercent.toFixed(2)})</div>`;
+    }
+    document.getElementById('carbonSummaryTable').innerHTML = html;
+}
+function renderLossTable() {
+    // Enerji tipi ve rota bazında toplam üretim ve toplam kayıp hesapla
+    const summary = {};
+    let minLossRate = 101;
+    let minInfo = '';
+    const allRoutes = new Set();
+    // Anomali türü istatistiği için
+    const anomalyTypes = {};
+    // Geçmiş verileri enerji tipi ve rota bazında grupla
+    lastHistoryData.forEach(d => {
+        const type = d.energy_type;
+        const route = d.route_name;
+        const value = d.value;
+        const loss = d.loss;
+        if (!summary[type]) summary[type] = {};
+        if (!summary[type][route]) summary[type][route] = {sumValue: 0, sumLoss: 0, values: []};
+        summary[type][route].sumValue += value;
+        summary[type][route].sumLoss += loss;
+        summary[type][route].values.push(value);
+        allRoutes.add(route);
+    });
+    // Anomali türlerini belirle
+    Object.keys(summary).forEach(type => {
+        Object.keys(summary[type]).forEach(route => {
+            const values = summary[type][route].values;
+            if (!values || values.length < 3) return;
+            let typeCounts = {"Ani yükseliş": 0, "Ani düşüş": 0, "Beklenmedik sıçrama": 0};
+            for (let i = 1; i < values.length; i++) {
+                const prev = values[i-1];
+                const curr = values[i];
+                const mean = values.slice(Math.max(0, i-10), i).reduce((a,b) => a+b,0) / Math.min(i,10);
+                const std = Math.sqrt(values.slice(Math.max(0, i-10), i).reduce((a,b) => a+Math.pow(b-mean,2),0) / Math.min(i,10));
+                if (std === 0) continue;
+                if (curr - mean > std) typeCounts["Ani yükseliş"]++;
+                else if (mean - curr > std) typeCounts["Ani düşüş"]++;
+                if (Math.abs(curr - prev) > std*2) typeCounts["Beklenmedik sıçrama"]++;
             }
-            monthSel.innerHTML = '<option value="">Tümü</option>';
-            for (let m = 1; m <= 12; m++) {
-                monthSel.innerHTML += `<option value="${m.toString().padStart(2,'0')}">${m.toString().padStart(2,'0')}</option>`;
-            }
-            daySel.innerHTML = '<option value="">Tümü</option>';
-            for (let d = 1; d <= 31; d++) {
-                daySel.innerHTML += `<option value="${d.toString().padStart(2,'0')}">${d.toString().padStart(2,'0')}</option>`;
-            }
+            // En çok görülen anomali türünü bul
+            let maxType = Object.keys(typeCounts).reduce((a,b) => typeCounts[a] > typeCounts[b] ? a : b);
+            if (!anomalyTypes[type]) anomalyTypes[type] = {};
+            anomalyTypes[type][route] = maxType;
+        });
+    });
+    const routes = Array.from(allRoutes).sort();
+    // Tablo HTML
+    let html = `<h3 style='margin-top:20px;'>Kayıp Oranları ve Anomali Türü</h3>`;
+    html += `<table style='width:100%;margin-bottom:20px;'><thead><tr><th>Enerji Tipi</th><th>Rota</th><th>Kayıp Oranı (%)</th><th>Anomali Türü</th></tr></thead><tbody>`;
+    Object.keys(summary).forEach(type => {
+        routes.forEach(route => {
+            const s = summary[type][route];
+            if (!s) return;
+            const lossRate = s.sumValue > 0 ? (s.sumLoss / s.sumValue * 100) : 0;
+            let anomaly = (anomalyTypes[type] && anomalyTypes[type][route]) ? anomalyTypes[type][route] : '';
+            if (lossRate < minLossRate && s.sumValue > 0) { minLossRate = lossRate; minInfo = `${type} / ${route}`; }
+            html += `<tr><td>${type}</td><td>${route}</td><td>${lossRate.toFixed(2)}</td><td>${anomaly}</td></tr>`;
+        });
+    });
+    html += `</tbody></table>`;
+    // Her enerji tipi için en az kayıplı rotayı bul
+    let minLossByType = {};
+    Object.keys(summary).forEach(type => {
+        let minLoss = 101;
+        let minRoute = '';
+        routes.forEach(route => {
+            const s = summary[type][route];
+            if (!s) return;
+            const lossRate = s.sumValue > 0 ? (s.sumLoss / s.sumValue * 100) : 0;
+            if (lossRate < minLoss && s.sumValue > 0) { minLoss = lossRate; minRoute = route; }
+        });
+        if (minRoute) {
+            minLossByType[type] = {route: minRoute, loss: minLoss};
         }
-        fillAnomalyDateDropdowns();
-
-        async function fetchAnomalies() {
-            const year = document.getElementById('anomalyYear').value;
-            const month = document.getElementById('anomalyMonth').value;
-            const day = document.getElementById('anomalyDay').value;
-            let start = "", end = "";
-            if (year && month && day) {
-                start = `${year}-${month}-${day}T00:00:00`;
-                end = `${year}-${month}-${day}T23:59:59`;
-            } else if (year && month) {
-                start = `${year}-${month}-01T00:00:00`;
-                end = `${year}-${month}-31T23:59:59`;
-            } else if (year) {
-                start = `${year}-01-01T00:00:00`;
-                end = `${year}-12-31T23:59:59`;
-            } else if (month && day) {
-                start = `2022-${month}-${day}T00:00:00`;
-                end = `2025-${month}-${day}T23:59:59`;
-            } else if (month) {
-                start = `2022-${month}-01T00:00:00`;
-                end = `2025-${month}-31T23:59:59`;
-            } else if (day) {
-                start = `2022-01-${day}T00:00:00`;
-                end = `2025-12-${day}T23:59:59`;
-            }
-            let url = `/api/anomalies?`;
-            if (year) url += `year=${year}&`;
-            if (month) url += `month=${month}&`;
-            if (day) url += `day=${day}&`;
-            if (start) url += `start=${start}&`;
-            if (end) url += `end=${end}&`;
-            const resp = await fetch(url);
-            let data;
-            try {
-                data = await resp.json();
-            } catch (e) {
-                document.getElementById('anomalyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucudan geçersiz veri alındı.</td></tr>`;
-                return;
-            }
-            if (data.error) {
-                document.getElementById('anomalyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Sunucu hatası: ${data.error}</td></tr>`;
-                return;
-            }
-            if (!data.data) {
-                document.getElementById('anomalyTable').innerHTML = `<tr><td colspan="4" style="color:red;">Veri bulunamadı.</td></tr>`;
-                return;
-            }
-            const table = document.getElementById('anomalyTable');
-            table.innerHTML = data.data.map(d => `
-                <tr>
-                  <td>${d.timestamp.replace('T',' ').slice(0,19)}</td>
-                  <td>${d.energy_type}</td>
-                  <td>${d.route_name}</td>
-                  <td>${d.value.toFixed(2)} kW</td>
-                </tr>
-            `).join('');
+    });
+    if (Object.keys(minLossByType).length > 0) {
+        html += `<div style='margin-bottom:20px;font-size:1.05em;'><b>Her enerji tipi için en az kayıplı rota:</b><ul style='margin:0 0 0 20px;'>`;
+        Object.keys(minLossByType).forEach(type => {
+            const info = minLossByType[type];
+            html += `<li>${type}: ${info.route} (%${info.loss.toFixed(2)})</li>`;
+        });
+        html += `</ul></div>`;
+    }
+    if (minInfo) {
+        html += `<div style='margin-bottom:20px;font-size:1.05em;'><b>Genel olarak en az kayıplı rota:</b> ${minInfo} (%${minLossRate.toFixed(2)})</div>`;
+    }
+    document.getElementById('lossSummaryTable').innerHTML = html;
+    renderLossTable.summary = summary;
+    renderLossTable.anomalyTypes = anomalyTypes;
+}
+function renderComboSuggestion() {
+    const comboBox = document.getElementById('comboSuggestionBox');
+    if (!comboBox) return;
+    // Son 24 saatin verilerini analiz et (veya tüm lastHistoryData)
+    const now = new Date();
+    const filtered = lastHistoryData.filter(d => {
+        const t = new Date(d.timestamp);
+        return (now - t) < 24*60*60*1000; // 24 saat
+    });
+    const summary = {};
+    let totalProduction = 0;
+    filtered.forEach(d => {
+        const type = d.energy_type;
+        if (!summary[type]) summary[type] = {sumValue: 0, sumLoss: 0, sumCarbon: 0, count: 0};
+        summary[type].sumValue += d.value;
+        summary[type].sumLoss += d.loss;
+        summary[type].sumCarbon += (carbonFactors[type] || 0) * d.value;
+        summary[type].count++;
+        totalProduction += d.value;
+    });
+    // Skor hesapla: kayıp oranı ve karbon düşük, üretim yüksek olanlar öncelikli
+    const combo = Object.keys(summary).map(type => {
+        const s = summary[type];
+        const lossRate = s.sumValue > 0 ? (s.sumLoss / s.sumValue * 100) : 0;
+        const carbonRate = s.sumValue > 0 ? (s.sumCarbon / s.sumValue) : 0;
+        return {
+            type,
+            production: s.sumValue,
+            lossRate,
+            carbonRate
+        };
+    }).sort((a, b) => {
+        // Önce kayıp oranı, sonra karbon, sonra üretim
+        if (a.lossRate !== b.lossRate) return a.lossRate - b.lossRate;
+        if (a.carbonRate !== b.carbonRate) return a.carbonRate - b.carbonRate;
+        return b.production - a.production;
+    });
+    // En verimli 2-3 kaynağı öner
+    const top = combo.slice(0, 3);
+    let html = `<div style='background:#eaf6fb;padding:12px 18px;border-radius:8px;margin-bottom:18px;font-size:1.12em;'><b>Bugün için önerilen enerji kombinasyonu:</b> `;
+    html += top.map(c => `${c.type} (%${((c.production/totalProduction)*100).toFixed(1)})`).join(', ');
+    html += `<br><span style='font-size:0.98em;color:#555;'>Neden? Son 24 saatte bu kaynakların kayıp oranı ve karbon ayak izi düşük, üretimi yüksek.</span></div>`;
+    comboBox.innerHTML = html;
+}
+function initMap() {
+    map = L.map('energyMap').setView([39.93, 32.85], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
+    }).addTo(map);
+    Object.keys(routeCoords).forEach(route => {
+        const poly = L.polyline(routeCoords[route], {color: 'blue', weight: 4}).addTo(map);
+        routeLayers[route] = poly;
+    });
+}
+window.onload = function() {
+    initMap();
+    renderForecastAdvice();
+};
+function updateMapWithAnomalies(anomalyData) {
+    // Önce tüm rotaları sıfırla
+    Object.keys(routeLayers).forEach(route => {
+        routeLayers[route].setStyle({color: 'blue', weight: 4, dashArray: null});
+        routeLayers[route].unbindTooltip();
+    });
+    anomalyMarkers.forEach(m => map.removeLayer(m));
+    anomalyMarkers = [];
+    // Son verilerden enerji ve kayıp oranı hesapla
+    const latestByRoute = {};
+    lastHistoryData.forEach(d => {
+        if (!latestByRoute[d.route_name] || new Date(d.timestamp) > new Date(latestByRoute[d.route_name].timestamp)) {
+            latestByRoute[d.route_name] = d;
         }
+    });
+    // Kayıp ve bakım analizini loss tablosundan al
+    const summary = renderLossTable.summary || {};
+    const anomalyTypes = renderLossTable.anomalyTypes || {};
+    // Rotaları güncelle
+    Object.keys(routeLayers).forEach(route => {
+        let color = 'blue';
+        let weight = 4;
+        let dashArray = null;
+        let tooltip = '';
+        let showKey = false;
+        let showAnomaly = false;
+        let anomalyType = '';
+        let lossRate = 0;
+        let production = 0;
+        if (summary && summary['Solar'] && summary['Solar'][route]) {
+            // Solar örneği, diğer enerji tipleri için de eklenebilir
+            lossRate = summary['Solar'][route].sumValue > 0 ? (summary['Solar'][route].sumLoss / summary['Solar'][route].sumValue * 100) : 0;
+            production = summary['Solar'][route].sumValue;
+        }
+        // Enerji miktarına göre kalınlık, kayıp oranına göre renk
+        if (production > 1000) weight = 8;
+        else if (production > 500) weight = 6;
+        else weight = 3;
+        if (lossRate > 10) { color = 'red'; dashArray = '5, 10'; showKey = true; }
+        else if (lossRate > 5) { color = 'orange'; }
+        // Tooltip
+        let anomaly = (anomalyTypes['Solar'] && anomalyTypes['Solar'][route]) ? anomalyTypes['Solar'][route] : '';
+        tooltip = `Rota ${route}: Üretim ${production.toFixed(2)} kW, Kayıp %${lossRate.toFixed(2)}, Anomali: ${anomaly}`;
+        if (showKey) tooltip += ', Bakım önerilir!';
+        routeLayers[route].setStyle({color, weight, dashArray});
+        routeLayers[route].bindTooltip(tooltip, {sticky: true});
+        // Bakım anahtarı ikonu
+        if (showKey && routeCoords[route]) {
+            const keyIcon = L.icon({iconUrl: 'https://cdn-icons-png.flaticon.com/512/61/61456.png', iconSize: [28,28]});
+            const marker = L.marker(routeCoords[route][1], {icon: keyIcon}).addTo(map).bindPopup('Bakım önerilir!');
+            anomalyMarkers.push(marker);
+        }
+    });
+    // Anomali markerları
+    anomalyData.forEach(a => {
+        if (routeCoords[a.route_name]) {
+            // Şiddetli anomali için yanıp sönen kırmızı marker
+            const coord = routeCoords[a.route_name][1];
+            const marker = L.marker(coord, {icon: L.divIcon({className:'blinking-marker', html:'<div style="width:24px;height:24px;background:red;border-radius:50%;box-shadow:0 0 8px 4px #f00;animation:blink 1s infinite;"></div>'})})
+                .addTo(map)
+                .bindPopup(`Şiddetli anomali: ${a.energy_type} - ${a.value ? a.value.toFixed(2) : ''} kW`);
+            anomalyMarkers.push(marker);
+        }
+    });
+}
+function renderAutoAdvice(summary, anomalyTypes) {
+    let html = `<div style='background:#fffbe6;padding:12px 18px;border-radius:8px;margin-bottom:18px;font-size:1.12em;'>`;
+    html += `<b>Otomatik Sistem Önerileri</b><br>`;
+    // Bakım önerileri - tek satırda, enerji tipi başına
+    html += `<div style='margin-top:10px;'><b>Bakım Önerileri</b> <span style='font-size:0.97em;color:#888;'>(Son 24 saatin kayıp oranı analizine göre)</span><ul style='margin:0 0 0 20px;'>`;
+    Object.keys(summary).forEach(type => {
+        // %10 üzeri kayıp oranı olan rotaları topla
+        let rotalar = [];
+        Object.keys(summary[type]).forEach(route => {
+            const s = summary[type][route];
+            const lossRate = s.sumValue > 0 ? (s.sumLoss / s.sumValue * 100) : 0;
+            if (lossRate > 10) {
+                rotalar.push(`${route} (%${lossRate.toFixed(2)})`);
+            }
+        });
+        if (rotalar.length > 0) {
+            html += `<li><b>${type}:</b> ${rotalar.join(', ')}</li>`;
+        }
+    });
+    html += `</ul><div style='font-size:0.97em;color:#888;'>Not: Sadece %10 üzeri kayıp oranı olan rotalar listelenmiştir.</div></div>`;
+    // Ani yükseliş/düşüş uyarıları
+    html += `<div style='margin-top:10px;'><b>Ani Yükseliş/Düşüş Uyarıları</b> <span style='font-size:0.97em;color:#888;'>(Geçmiş veri trend analizine göre)</span><ul style='margin:0 0 0 20px;'>`;
+    Object.keys(anomalyTypes).forEach(type => {
+        Object.keys(anomalyTypes[type]).forEach(route => {
+            const anomaly = anomalyTypes[type][route];
+            if (anomaly === 'Ani yükseliş') {
+                html += `<li>${type} / ${route}: Ani yükseliş tespit edildi - <b>Üretimi geçici olarak azalt!</b></li>`;
+            } else if (anomaly === 'Ani düşüş') {
+                html += `<li>${type} / ${route}: Ani düşüş tespit edildi - <b>Bakım ve kontrol önerilir!</b></li>`;
+            } else if (anomaly === 'Beklenmedik sıçrama') {
+                html += `<li>${type} / ${route}: Beklenmedik sıçrama tespit edildi - <b>Veri ve ekipman kontrolü yap!</b></li>`;
+            }
+        });
+    });
+    html += `</ul></div>`;
+    html += `<div style='margin-top:10px;font-size:0.97em;color:#888;'>Tüm öneriler, sistemdeki gerçek verilerin analizine dayalıdır, rastgele değildir.</div>`;
+    html += `</div>`;
+    document.getElementById('autoAdviceBox').innerHTML = html;
+}
+function showDemoMap() {
+    // Demo summary (kayıp ve üretim)
+    renderLossTable.summary = {
+        'Solar': {
+            'A': {sumValue: 1200, sumLoss: 30},   // Kalın mavi çizgi
+            'B': {sumValue: 200, sumLoss: 40},    // İnce kırmızı çizgi, bakım
+            'C': {sumValue: 600, sumLoss: 40},    // Orta turuncu çizgi
+            'D': {sumValue: 800, sumLoss: 20}     // Normal
+        }
+    };
+    // Demo anomaly types
+    renderLossTable.anomalyTypes = {
+        'Solar': {
+            'A': 'Yok',
+            'B': 'Ani düşüş',
+            'C': 'Beklenmedik sıçrama',
+            'D': 'Ani yükseliş'
+        }
+    };
+    // Demo anomalyData (yanıp sönen marker sadece D)
+    const demoAnomalies = [
+        {route_name: 'D', energy_type: 'Solar', value: 80}
+    ];
+    updateMapWithAnomalies(demoAnomalies);
+}
+// Prophet tahmin verisini çek
+async function fetchForecast(energyType, routeName) {
+    const resp = await fetch(`/api/forecast?energy_type=${encodeURIComponent(energyType)}&route_name=${encodeURIComponent(routeName)}`);
+    const data = await resp.json();
+    if (data.error) return null;
+    return data.forecast;
+}
+// Prophet tahminine dayalı öneri kutusu
+async function renderForecastAdvice() {
+    const forecast = await fetchForecast('Solar', 'A');
+    if (!forecast) return;
+    const first = forecast[0];
+    const last = forecast[forecast.length - 1];
+    let html = `<div style='background:#eaf6fb;padding:12px 18px;border-radius:8px;margin-bottom:18px;font-size:1.12em;'><b>Gelecek Tahmini (Solar/A)</b> <span style='font-size:0.97em;color:#888;'>(Zaman serisi tahminine göre)</span><br>`;
+    if (last.yhat < 0.8 * first.yhat) {
+        html += "Önümüzdeki saatlerde üretimde ciddi düşüş bekleniyor, yedek kaynak planla!";
+    } else if (last.yhat > 1.2 * first.yhat) {
+        html += "Üretimde artış bekleniyor, depolama kapasitesini kontrol et!";
+    } else {
+        html += "Üretim trendi stabil görünüyor.";
+    }
+    html += "</div>";
+    document.getElementById('autoAdviceBox').innerHTML += html;
+}
+// Butona basınca son 30 veriyi çekip grafiği çiz
+if (typeof chart !== 'undefined' && chart) { chart.destroy(); chart = null; }
+document.getElementById('showChartBtn').addEventListener('click', async function() {
+    document.getElementById('chartError').textContent = '';
+    try {
+        const resp = await fetch('/api/history?limit=30');
+        if (!resp.ok) {
+            document.getElementById('chartError').textContent = 'API Hatası: ' + resp.status + ' - ' + resp.statusText;
+            return;
+        }
+        const data = await resp.json();
+        if (!data.data || !Array.isArray(data.data) || data.data.length === 0) {
+            document.getElementById('chartError').textContent = 'Veri bulunamadı veya API hatası!';
+            return;
+        }
+        const last30 = data.data;
+        const selectedMetric = document.getElementById('metricSelect').value;
+        let chartData = {};
+        Object.keys(colors).forEach(type => { chartData[type] = 0; });
+        if (selectedMetric === 'anomaly') {
+            Object.keys(colors).forEach(type => {
+                chartData[type] = last30.filter(d => d.energy_type === type).length;
+            });
+        } else if (selectedMetric === 'production') {
+            last30.forEach(d => { if (d.value && chartData[d.energy_type] !== undefined) chartData[d.energy_type] += d.value; });
+        } else if (selectedMetric === 'loss') {
+            last30.forEach(d => { if (d.loss && chartData[d.energy_type] !== undefined) chartData[d.energy_type] += d.loss; });
+        } else if (selectedMetric === 'outgoing') {
+            last30.forEach(d => { if (d.outgoing && chartData[d.energy_type] !== undefined) chartData[d.energy_type] += d.outgoing; });
+        }
+        const ctx = document.getElementById('chart').getContext('2d');
+        if (typeof chart !== 'undefined' && chart) { chart.destroy(); }
+        chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: Object.keys(colors),
+                datasets: [{
+                    label: document.querySelector('#metricSelect option:checked').textContent,
+                    data: Object.keys(colors).map(type => chartData[type]),
+                    backgroundColor: Object.keys(colors).map(type => colors[type]),
+                    borderColor: Object.keys(colors).map(type => colors[type]),
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { title: { display: true, text: 'Enerji Türü' } },
+                    y: { beginAtZero: true, title: { display: true, text: document.querySelector('#metricSelect option:checked').textContent } }
+                },
+                animation: { duration: 1200, easing: 'easeInOutQuad' }
+            }
+        });
+    } catch (err) {
+        document.getElementById('chartError').textContent = 'Beklenmeyen hata: ' + err;
+    }
+});
     </script>
 </body>
 </html> 

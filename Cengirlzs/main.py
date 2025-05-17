@@ -7,6 +7,7 @@ import asyncio
 from sqlalchemy import create_engine, text
 import random
 from datetime import datetime
+from prophet import Prophet
 
 app = FastAPI()
 
@@ -40,6 +41,9 @@ try:
 except Exception as e:
     print("Bağlantı hatası:", e)
 
+storage_levels = {et: 0.0 for et in ENERGY_TYPES}
+storage_capacity = 500.0
+
 @app.get("/dashboard")
 def get_dashboard():
     return FileResponse("dashboard.html")
@@ -52,22 +56,32 @@ def root():
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     history = []
+    global storage_levels
     while True:
         now = pd.Timestamp.now()
         data_point = {"timestamp": now.strftime("%H:%M:%S")}
         for energy_type in ENERGY_TYPES:
             value = float(np.random.normal(sim_params[energy_type]["mean"], sim_params[energy_type]["std"]))
+            outgoing = float(np.random.uniform(0, value))  # Bağımsız rastgele giden
+            loss = float(np.random.uniform(0, value - outgoing))  # Bağımsız rastgele kayıp (üretimden giden çıktıktan sonra)
+            # Depolama = Önceki Depolama + (Üretim - Giden - Kayıp)
+            storage = storage_levels[energy_type] + (value - outgoing - loss)
+            if storage > storage_capacity:
+                storage = storage_capacity
+            if storage < 0:
+                storage = 0
+            storage_levels[energy_type] = storage
             route_name = random.choice(['A', 'B', 'C', 'D'])
             # Veritabanına kaydet
             with engine.begin() as conn:
                 conn.execute(
                     text("""
-                        INSERT INTO energy_data (timestamp, energy_type, value, route_name)
-                        VALUES (:timestamp, :energy_type, :value, :route_name)
+                        INSERT INTO energy_data (timestamp, energy_type, value, outgoing, loss, storage, route_name)
+                        VALUES (:timestamp, :energy_type, :value, :outgoing, :loss, :storage, :route_name)
                     """),
-                    {"timestamp": now, "energy_type": energy_type, "value": value, "route_name": route_name}
+                    {"timestamp": now, "energy_type": energy_type, "value": value, "outgoing": outgoing, "loss": loss, "storage": storage, "route_name": route_name}
                 )
-            data_point[energy_type] = {"value": value, "route_name": route_name}
+            data_point[energy_type] = {"value": value, "outgoing": outgoing, "loss": loss, "storage": storage, "route_name": route_name}
         history.append(data_point)
         if len(history) > 100:
             history.pop(0)
@@ -86,7 +100,7 @@ def get_history(
     end: str = Query(None)
 ):
     try:
-        query = "SELECT timestamp, energy_type, value, route_name FROM energy_data WHERE 1=1"
+        query = "SELECT timestamp, energy_type, value, outgoing, loss, storage, route_name FROM energy_data WHERE 1=1"
         params = {}
         if energy_type:
             query += " AND energy_type = :energy_type"
@@ -140,19 +154,15 @@ def add_anomaly(
 
 @app.get("/api/anomalies")
 def get_anomalies(
-    year: int = None,
     month: int = None,
     day: int = None,
     start: str = None,
     end: str = None
 ):
-    print(f"[ANOMALY GET] year={year}, month={month}, day={day}, start={start}, end={end}")
+    print(f"[ANOMALY GET] month={month}, day={day}, start={start}, end={end}")
     try:
         query = "SELECT timestamp, energy_type, route_name, value FROM anomalies WHERE 1=1"
         params = {}
-        if year:
-            query += " AND EXTRACT(YEAR FROM timestamp) = :year"
-            params["year"] = year
         if month:
             query += " AND EXTRACT(MONTH FROM timestamp) = :month"
             params["month"] = month
@@ -173,6 +183,34 @@ def get_anomalies(
         return {"data": rows}
     except Exception as e:
         print(f"[ANOMALY GET] ERROR: {e}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/forecast")
+def forecast_energy(
+    energy_type: str = Query(...),
+    route_name: str = Query(...)
+):
+    try:
+        # Geçmiş verileri çek (son 1000 kayıt)
+        query = "SELECT timestamp, value FROM energy_data WHERE energy_type = :energy_type AND route_name = :route_name ORDER BY timestamp ASC LIMIT 1000"
+        params = {"energy_type": energy_type, "route_name": route_name}
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params)
+            rows = [dict(r._mapping) for r in result]
+        if not rows or len(rows) < 20:
+            return {"error": "Yeterli veri yok"}
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={"timestamp": "ds", "value": "y"})
+        # Prophet modeli
+        m = Prophet()
+        m.fit(df)
+        future = m.make_future_dataframe(periods=5, freq='H')
+        forecast = m.predict(future)
+        # Son 5 tahmini ve trendi döndür
+        result = forecast[['ds', 'yhat', 'trend']].tail(5).to_dict(orient='records')
+        return {"forecast": result}
+    except Exception as e:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=500, content={"error": str(e)})
 
