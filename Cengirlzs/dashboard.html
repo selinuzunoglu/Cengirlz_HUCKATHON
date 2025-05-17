@@ -871,9 +871,36 @@ function initMap() {
         routeLayers[route] = poly;
     });
 }
+async function renderAllForecastAdvices() {
+    const energyTypes = ['Solar', 'Wind', 'Battery', 'Factory', 'Hydro', 'Geothermal', 'Nuclear'];
+    const routes = ['A', 'B', 'C', 'D'];
+    let html = '';
+    for (const type of energyTypes) {
+        for (const route of routes) {
+            try {
+                const resp = await fetch(`/api/forecast?energy_type=${encodeURIComponent(type)}&route_name=${encodeURIComponent(route)}`);
+                const data = await resp.json();
+                if (!data || data.error || !data.forecast) continue;
+                const forecast = data.forecast;
+                const first = forecast[0];
+                const last = forecast[forecast.length - 1];
+                html += `<div style='background:#eaf6fb;padding:12px 18px;border-radius:8px;margin-bottom:18px;font-size:1.12em;'><b>Gelecek Tahmini (${type}/${route})</b> <span style='font-size:0.97em;color:#888;'>(Zaman serisi tahminine göre)</span><br>`;
+                if (last.yhat < 0.8 * first.yhat) {
+                    html += "Önümüzdeki saatlerde üretimde ciddi düşüş bekleniyor, yedek kaynak planla!";
+                } else if (last.yhat > 1.2 * first.yhat) {
+                    html += "Üretimde artış bekleniyor, depolama kapasitesini kontrol et!";
+                } else {
+                    html += "Üretim trendi stabil görünüyor.";
+                }
+                html += "</div>";
+            } catch (e) { /* ignore errors for missing data */ }
+        }
+    }
+    document.getElementById('autoAdviceBox').innerHTML = html;
+}
 window.onload = function() {
     initMap();
-    renderForecastAdvice();
+    renderAllForecastAdvices();
 };
 function updateMapWithAnomalies(anomalyData) {
     // Önce tüm rotaları sıfırla
@@ -1003,30 +1030,6 @@ function showDemoMap() {
         {route_name: 'D', energy_type: 'Solar', value: 80}
     ];
     updateMapWithAnomalies(demoAnomalies);
-}
-// Prophet tahmin verisini çek
-async function fetchForecast(energyType, routeName) {
-    const resp = await fetch(`/api/forecast?energy_type=${encodeURIComponent(energyType)}&route_name=${encodeURIComponent(routeName)}`);
-    const data = await resp.json();
-    if (data.error) return null;
-    return data.forecast;
-}
-// Prophet tahminine dayalı öneri kutusu
-async function renderForecastAdvice() {
-    const forecast = await fetchForecast('Solar', 'A');
-    if (!forecast) return;
-    const first = forecast[0];
-    const last = forecast[forecast.length - 1];
-    let html = `<div style='background:#eaf6fb;padding:12px 18px;border-radius:8px;margin-bottom:18px;font-size:1.12em;'><b>Gelecek Tahmini (Solar/A)</b> <span style='font-size:0.97em;color:#888;'>(Zaman serisi tahminine göre)</span><br>`;
-    if (last.yhat < 0.8 * first.yhat) {
-        html += "Önümüzdeki saatlerde üretimde ciddi düşüş bekleniyor, yedek kaynak planla!";
-    } else if (last.yhat > 1.2 * first.yhat) {
-        html += "Üretimde artış bekleniyor, depolama kapasitesini kontrol et!";
-    } else {
-        html += "Üretim trendi stabil görünüyor.";
-    }
-    html += "</div>";
-    document.getElementById('autoAdviceBox').innerHTML += html;
 }
 // Butona basınca son 30 veriyi çekip grafiği çiz
 if (typeof chart !== 'undefined' && chart) { chart.destroy(); chart = null; }

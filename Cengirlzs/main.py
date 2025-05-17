@@ -62,12 +62,9 @@ async def websocket_endpoint(websocket: WebSocket):
         data_point = {"timestamp": now.strftime("%H:%M:%S")}
         for energy_type in ENERGY_TYPES:
             value = float(np.random.normal(sim_params[energy_type]["mean"], sim_params[energy_type]["std"]))
-            outgoing = float(np.random.uniform(0, value))  # Bağımsız rastgele giden
-            loss = float(np.random.uniform(0, value - outgoing))  # Bağımsız rastgele kayıp (üretimden giden çıktıktan sonra)
-            # Depolama = Önceki Depolama + (Üretim - Giden - Kayıp)
+            outgoing = float(np.random.uniform(0.7 * value, 1.2 * value))  # daha gerçekçi outgoing
+            loss = float(np.random.uniform(0, 0.5 * value))
             storage = storage_levels[energy_type] + (value - outgoing - loss)
-            if storage > storage_capacity:
-                storage = storage_capacity
             if storage < 0:
                 storage = 0
             storage_levels[energy_type] = storage
